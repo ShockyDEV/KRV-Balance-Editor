@@ -134,6 +134,7 @@ namespace BalanceEditor
 
         /// <summary>
         /// Scan tower skills (excluding system/visual) for max numeric array length.
+        /// Also checks resolved forward_key unit skills for level arrays.
         /// Returns 0 if no level-indexed arrays found (no skill level selector needed).
         /// </summary>
         int GetTowerMaxSkillLevels(Dictionary<string, object> towerData)
@@ -152,11 +153,86 @@ namespace BalanceEditor
 
                 int found = FindMaxNumericArrayLen(sk, 0);
                 if (found > max) max = found;
+
+                // Also check resolved forward skills in units data
+                if (key == "forward")
+                {
+                    string fwdKey = PlistHelper.GetString(sk, "forward_key");
+                    if (fwdKey != null)
+                    {
+                        var resolved = ResolveTowerForward(fwdKey);
+                        if (resolved.HasValue)
+                        {
+                            int fwdFound = FindMaxNumericArrayLen(resolved.Value.Data, 0);
+                            if (fwdFound > max) max = fwdFound;
+                        }
+                    }
+                }
             }
 
             // If any level arrays exist, ensure minimum of 4 (KRV standard: 3 upgrade levels + global)
             if (max > 0 && max < 4) max = 4;
             return max;
+        }
+
+        /// <summary>
+        /// Resolve a tower's forward_key to the actual unit skill data in units_settings.plist.
+        /// Searches all factions for a skill with matching id.
+        /// </summary>
+        (Dictionary<string, object> Data, string Faction, string Unit, int Index)?
+            ResolveTowerForward(string forwardKey)
+        {
+            foreach (var factionKv in unitsData)
+            {
+                if (factionKv.Key == "default_config" || factionKv.Key == "heroes") continue;
+                var factionDict = factionKv.Value as Dictionary<string, object>;
+                if (factionDict == null) continue;
+
+                foreach (var unitKv in factionDict)
+                {
+                    var unitDict = unitKv.Value as Dictionary<string, object>;
+                    if (unitDict == null) continue;
+
+                    var uSkills = PlistHelper.GetList(unitDict, "skills");
+                    if (uSkills == null) continue;
+
+                    for (int si = 0; si < uSkills.Count; si++)
+                    {
+                        var usk = uSkills[si] as Dictionary<string, object>;
+                        if (usk == null) continue;
+                        if (PlistHelper.GetString(usk, "id") == forwardKey)
+                            return (usk, factionKv.Key, unitKv.Key, si);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Find the spawned unit data for a barracks tower (soldiers.type → unit key in units data).
+        /// </summary>
+        (Dictionary<string, object> Data, string Faction, string Unit)?
+            FindSpawnedUnit(Dictionary<string, object> towerData)
+        {
+            var soldiers = PlistHelper.GetDict(towerData, "soldiers");
+            if (soldiers == null) return null;
+
+            string unitType = PlistHelper.GetString(soldiers, "type");
+            if (string.IsNullOrEmpty(unitType)) return null;
+
+            foreach (var factionKv in unitsData)
+            {
+                if (factionKv.Key == "default_config" || factionKv.Key == "heroes") continue;
+                var factionDict = factionKv.Value as Dictionary<string, object>;
+                if (factionDict == null) continue;
+
+                if (factionDict.TryGetValue(unitType, out var unitObj))
+                {
+                    var unitDict = unitObj as Dictionary<string, object>;
+                    if (unitDict != null) return (unitDict, factionKv.Key, unitType);
+                }
+            }
+            return null;
         }
 
         void RebuildTowerContent(TowerFamily fam, string varKey, int skillLevelIdx = -1)
@@ -231,6 +307,58 @@ namespace BalanceEditor
                 }
             }
 
+            // ── Spawned unit stats (for barracks towers) ──
+            var spawnedUnit = FindSpawnedUnit(data);
+            if (spawnedUnit.HasValue)
+            {
+                sy += 4;
+                var unitHdr = new Label
+                {
+                    Text = "── Spawned Unit (" + Pretty(spawnedUnit.Value.Unit) + ") ──",
+                    Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(0, 100, 150),
+                    AutoSize = true,
+                    MaximumSize = new Size(260, 0),
+                    Location = new Point(8, sy)
+                };
+                gbStats.Controls.Add(unitHdr);
+                sy = unitHdr.Bottom + 4;
+
+                var uData = spawnedUnit.Value.Data;
+                var uBasePath = new List<object> { spawnedUnit.Value.Faction, spawnedUnit.Value.Unit };
+
+                string[] unitCoreStats = { "health", "armor", "speed", "block_range" };
+                foreach (var stat in unitCoreStats)
+                {
+                    if (!uData.ContainsKey(stat)) continue;
+                    double? nv = PlistHelper.AsNumber(uData[stat]);
+                    if (nv.HasValue)
+                    {
+                        bool isArmor = (stat == "armor");
+                        sy = isArmor
+                            ? AddArmorStatRow(gbStats, sy, Pretty(stat), nv.Value, "units",
+                                new List<object>(uBasePath) { stat })
+                            : AddStatRow(gbStats, sy, Pretty(stat), nv.Value, "units",
+                                new List<object>(uBasePath) { stat });
+                    }
+                }
+
+                // Find unit's melee/main combat skill for damage stats
+                var uMainSkill = FindTowerMainSkill(uData);
+                if (uMainSkill.Data != null)
+                {
+                    var uSkillPath = new List<object>(uBasePath) { "skills", uMainSkill.Index };
+                    foreach (string k in new[] { "damage_min", "damage_max", "cooldown" })
+                    {
+                        if (!uMainSkill.Data.ContainsKey(k)) continue;
+                        double? nv = PlistHelper.AsNumber(uMainSkill.Data[k]);
+                        if (nv.HasValue)
+                            sy = AddStatRow(gbStats, sy, Pretty(k), nv.Value, "units",
+                                new List<object>(uSkillPath) { k });
+                    }
+                }
+            }
+
             gbStats.Height = sy + 10;
             contentPanel.Controls.Add(gbStats);
 
@@ -287,6 +415,46 @@ namespace BalanceEditor
 
                     sky = RenderSkillSection(gbSkills, sky, skillId, skillDict, file,
                         skillPath, skillIcon, desc, skillLevelIdx, 0, maxSkillLvl);
+
+                    // For "forward" skills, resolve to actual unit skill and render combat fields
+                    if (skillKey == "forward")
+                    {
+                        string fwdKey = PlistHelper.GetString(skillDict, "forward_key");
+                        if (fwdKey != null)
+                        {
+                            var resolved = ResolveTowerForward(fwdKey);
+                            if (resolved.HasValue)
+                            {
+                                var resolvedHdr = new Label
+                                {
+                                    Text = "── " + Pretty(fwdKey) + " (Unit Skill) ──",
+                                    Font = new Font("Segoe UI", 8, FontStyle.Bold),
+                                    ForeColor = Color.FromArgb(0, 100, 150),
+                                    AutoSize = true,
+                                    MaximumSize = new Size(gbSkills.Width - 24, 0),
+                                    Location = new Point(16, sky)
+                                };
+                                gbSkills.Controls.Add(resolvedHdr);
+                                sky = resolvedHdr.Bottom + 4;
+
+                                var unitPath = new List<object> {
+                                    resolved.Value.Faction, resolved.Value.Unit,
+                                    "skills", resolved.Value.Index };
+
+                                int fwdMaxLvl = FindMaxNumericArrayLen(resolved.Value.Data, 0);
+                                if (fwdMaxLvl > 0 && fwdMaxLvl < 4) fwdMaxLvl = 4;
+
+                                if (skillLevelIdx >= 0 && fwdMaxLvl > 0)
+                                    sky = RenderLevelAwareFields(gbSkills, resolved.Value.Data,
+                                        "units", unitPath, sky, skillLevelIdx, 0, fwdMaxLvl);
+                                else
+                                    sky = RenderFields(gbSkills, resolved.Value.Data,
+                                        "units", unitPath, sky);
+
+                                sky += 4;
+                            }
+                        }
+                    }
                 }
             }
 
