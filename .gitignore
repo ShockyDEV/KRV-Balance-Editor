@@ -1,0 +1,8 @@
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+.vs/
+*.backup
+tier_list.json
