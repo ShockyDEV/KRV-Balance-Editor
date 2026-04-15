@@ -17,6 +17,7 @@ namespace BalanceEditor
         static readonly (string Id, string Label, Color Color)[] TierDefs =
         {
             ("S", "Broken",      Color.FromArgb(255, 150, 160)),
+            ("A+","Overpowered", Color.FromArgb(255, 170, 130)),
             ("A", "Really Good", Color.FromArgb(255, 190, 110)),
             ("B", "Strong",      Color.FromArgb(255, 230, 100)),
             ("C", "Balanced",    Color.FromArgb(210, 230, 110)),

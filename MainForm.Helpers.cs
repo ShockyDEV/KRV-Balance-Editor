@@ -87,6 +87,111 @@ namespace BalanceEditor
         }
 
         // ══════════════════════════════════════════════════
+        //  ARMOR TYPE COMBO (Physical = 0, Magical = 1)
+        // ══════════════════════════════════════════════════
+
+        static readonly string[] ArmorTypeNames = { "Physical", "Magical" };
+
+        ComboBox MkArmorTypeCombo(double value, string file, List<object> dataPath)
+        {
+            string changeKey = MakeChangeKey(file, dataPath);
+            int idx = (int)Math.Round(value);
+            if (idx < 0 || idx >= ArmorTypeNames.Length) idx = 0;
+
+            var cb = new ComboBox
+            {
+                Width = 90,
+                Height = 22,
+                Font = new Font("Segoe UI", 8.5f),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FlatStyle = FlatStyle.Flat
+            };
+            cb.Items.AddRange(ArmorTypeNames);
+            cb.SelectedIndex = idx;
+
+            var tag = new InputTag
+            {
+                OriginalValue = value,
+                FilePath = file,
+                DataPath = new List<object>(dataPath),
+                ChangeKey = changeKey
+            };
+            cb.Tag = tag;
+
+            if (Changes.TryGetValue(changeKey, out var existing))
+            {
+                int eIdx = (int)Math.Round(existing.Value);
+                if (eIdx >= 0 && eIdx < ArmorTypeNames.Length) cb.SelectedIndex = eIdx;
+                cb.ForeColor = GoldColor;
+                cb.Font = new Font(cb.Font, FontStyle.Bold);
+            }
+
+            cb.SelectedIndexChanged += (s, e) =>
+            {
+                var c = (ComboBox)s;
+                var t = (InputTag)c.Tag;
+                double newVal = c.SelectedIndex;
+                if (Math.Abs(newVal - t.OriginalValue) < 1e-9)
+                {
+                    Changes.Remove(t.ChangeKey);
+                    c.ForeColor = SystemColors.WindowText;
+                    c.Font = new Font(c.Font, FontStyle.Regular);
+                }
+                else
+                {
+                    Changes[t.ChangeKey] = new ChangeEntry
+                    {
+                        File = t.FilePath,
+                        Path = t.DataPath,
+                        Value = newVal
+                    };
+                    c.ForeColor = GoldColor;
+                    c.Font = new Font(c.Font, FontStyle.Bold);
+                }
+                UpdateStatus();
+            };
+
+            return cb;
+        }
+
+        int AddArmorTypeRow(Control parent, int y, double value, string file, List<object> path)
+        {
+            return AddArmorTypeRow(parent, y, value, file, path, 8);
+        }
+
+        int AddArmorTypeRow(Control parent, int y, double value, string file, List<object> path, int startX)
+        {
+            var lbl = new Label
+            {
+                Text = "Armor Type",
+                Font = new Font("Segoe UI", 8.5f),
+                ForeColor = FieldLabelColor,
+                AutoSize = false,
+                Size = new Size(140, 20),
+                Location = new Point(startX, y + 2),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            parent.Controls.Add(lbl);
+
+            var cb = MkArmorTypeCombo(value, file, path);
+            cb.Location = new Point(startX + 144, y);
+            parent.Controls.Add(cb);
+
+            // Tooltip-style hint after the combo
+            var hint = new Label
+            {
+                Text = "(Magical = magic-resistant)",
+                Font = new Font("Segoe UI", 7f, FontStyle.Italic),
+                ForeColor = Color.Gray,
+                AutoSize = true,
+                Location = new Point(startX + 144 + 96, y + 4)
+            };
+            parent.Controls.Add(hint);
+
+            return y + 26;
+        }
+
+        // ══════════════════════════════════════════════════
         //  FIELD RENDERING HELPERS
         // ══════════════════════════════════════════════════
 
@@ -94,7 +199,7 @@ namespace BalanceEditor
             List<object> basePath, int startY, int depth = 0, HashSet<string> exclude = null,
             bool isVFX = false)
         {
-            if (data == null || depth > 5) return startY;
+            if (data == null || depth > 7) return startY;
             int y = startY;
             int leftMargin = 8 + depth * 12;
             bool showVFX = cbShowVFX?.Checked ?? false;
@@ -117,10 +222,51 @@ namespace BalanceEditor
                     continue;
                 }
 
-                if (kv.Value is List<object> arr && arr.Count > 0 && arr.All(o => PlistHelper.AsNumber(o).HasValue))
+                if (kv.Value is List<object> arr && arr.Count > 0)
                 {
-                    y = CreateArrayRow(parent, leftMargin, y, Pretty(key), file, path, arr, hl);
-                    continue;
+                    if (arr.All(o => PlistHelper.AsNumber(o).HasValue))
+                    {
+                        y = CreateArrayRow(parent, leftMargin, y, Pretty(key), file, path, arr, hl);
+                        continue;
+                    }
+                    // List of dicts (e.g. modifier_tick, effects, paths_objects)
+                    if (arr.All(o => o is Dictionary<string, object>))
+                    {
+                        bool anyNumeric = arr.Cast<Dictionary<string, object>>()
+                            .Any(d => HasNumericContent(d, depth + 1));
+                        if (!anyNumeric) continue;
+                        var lstLbl = new Label
+                        {
+                            Text = Pretty(key) + ":",
+                            Font = new Font("Segoe UI", 8, FontStyle.Bold),
+                            ForeColor = isVFX ? Color.FromArgb(120, 100, 0) : FieldLabelColor,
+                            BackColor = isVFX ? VFXHighlight : Color.Transparent,
+                            AutoSize = true,
+                            Location = new Point(leftMargin, y)
+                        };
+                        parent.Controls.Add(lstLbl);
+                        y = lstLbl.Bottom + 2;
+                        for (int idx = 0; idx < arr.Count; idx++)
+                        {
+                            var sd = (Dictionary<string, object>)arr[idx];
+                            if (!HasNumericContent(sd, depth + 1)) continue;
+                            string idLabel = sd.TryGetValue("id", out var idv) ? idv as string
+                                          : sd.TryGetValue("key", out var kv2) ? kv2 as string : null;
+                            var idxLbl = new Label
+                            {
+                                Text = idLabel != null ? $"[{idx}] {Pretty(idLabel)}" : $"[{idx}]",
+                                Font = new Font("Segoe UI", 7.5f, FontStyle.Italic),
+                                ForeColor = Color.Gray,
+                                AutoSize = true,
+                                Location = new Point(leftMargin + 12, y)
+                            };
+                            parent.Controls.Add(idxLbl);
+                            y = idxLbl.Bottom + 1;
+                            var subPath = new List<object>(path) { idx };
+                            y = RenderFields(parent, sd, file, subPath, y, depth + 1, null, isVFX);
+                        }
+                        continue;
+                    }
                 }
 
                 if (kv.Value is Dictionary<string, object> sub && HasNumericContent(sub, depth + 1))
@@ -145,13 +291,21 @@ namespace BalanceEditor
 
         bool HasNumericContent(Dictionary<string, object> dict, int depth)
         {
-            if (depth > 5) return false;
+            if (depth > 7) return false;
             foreach (var kv in dict)
             {
                 if (StaticData.Skip.Contains(kv.Key)) continue;
                 if (PlistHelper.AsNumber(kv.Value).HasValue) return true;
-                if (kv.Value is List<object> arr && arr.Count > 0 && arr.All(o => PlistHelper.AsNumber(o).HasValue))
-                    return true;
+                if (kv.Value is List<object> arr && arr.Count > 0)
+                {
+                    if (arr.All(o => PlistHelper.AsNumber(o).HasValue)) return true;
+                    // List of dicts (e.g. modifier_tick, effects) — recurse
+                    if (arr.All(o => o is Dictionary<string, object>))
+                    {
+                        foreach (var item in arr)
+                            if (HasNumericContent((Dictionary<string, object>)item, depth + 1)) return true;
+                    }
+                }
                 if (kv.Value is Dictionary<string, object> sub && HasNumericContent(sub, depth + 1))
                     return true;
             }

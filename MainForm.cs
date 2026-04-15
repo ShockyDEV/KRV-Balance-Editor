@@ -21,6 +21,10 @@ namespace BalanceEditor
         XDocument unitsDoc;
         string towersFilePath, unitsFilePath;
 
+        // ── Platform mode (PC vs Android) ──
+        bool isAndroidMode;
+        string pcTowersPath, pcUnitsPath;
+
         // ── Changes ──
         Dictionary<string, ChangeEntry> Changes = new Dictionary<string, ChangeEntry>();
 
@@ -38,6 +42,8 @@ namespace BalanceEditor
         PictureBox picPortrait;
         Label lblStatus;
         Button btnSave, btnRestore;
+        ComboBox cbPlatform;
+        Label lblPlatformIndicator;
 
         // ── ListBox data ──
         List<ListItemTag> allItems = new List<ListItemTag>();
@@ -70,6 +76,8 @@ namespace BalanceEditor
 
             towersFilePath = Path.Combine(gameRoot, @"KR4\Settings\towers_settings.plist");
             unitsFilePath = Path.Combine(gameRoot, @"KR4\Settings\units_settings.plist");
+            pcTowersPath = towersFilePath;
+            pcUnitsPath = unitsFilePath;
 
             LoadAllData();
             BuildUI();
@@ -119,6 +127,11 @@ namespace BalanceEditor
             dataMenu.DropDownItems.Add("Save", null, (s, e) => SaveButton_Click(s, e));
             dataMenu.DropDownItems.Add("Restore Backup", null, (s, e) => RestoreButton_Click(s, e));
             dataMenu.DropDownItems.Add(new ToolStripSeparator());
+            dataMenu.DropDownItems.Add("Push to Android", null, AndroidPush_Click);
+            dataMenu.DropDownItems.Add("Pull from Android", null, AndroidPull_Click);
+            dataMenu.DropDownItems.Add("Unlock All Heroes/Towers", null, AndroidUnlockAll_Click);
+            dataMenu.DropDownItems.Add("Clear APK Cache", null, AndroidClearCache_Click);
+            dataMenu.DropDownItems.Add(new ToolStripSeparator());
             dataMenu.DropDownItems.Add("Exit", null, (s, e) => Close());
             menu.Items.Add(dataMenu);
             MainMenuStrip = menu;
@@ -156,7 +169,18 @@ namespace BalanceEditor
             tbSearchKey = new TextBox { Width = 150, Location = new Point(416, 5) };
             tbSearchKey.TextChanged += (s, e) => ApplyFilter();
 
-            topPanel.Controls.AddRange(new Control[] { lblName, tbSearchName, lblCat, cbCategory, lblKey, tbSearchKey });
+            var lblPlat = new Label { Text = "Platform", AutoSize = true, Location = new Point(580, 8) };
+            cbPlatform = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 90,
+                Location = new Point(640, 4),
+                Items = { "PC", "Android" }
+            };
+            cbPlatform.SelectedIndex = 0;
+            cbPlatform.SelectedIndexChanged += CbPlatform_Changed;
+
+            topPanel.Controls.AddRange(new Control[] { lblName, tbSearchName, lblCat, cbCategory, lblKey, tbSearchKey, lblPlat, cbPlatform });
 
             // ── Left panel (ListBox) ──
             var leftPanel = new Panel
@@ -258,6 +282,15 @@ namespace BalanceEditor
                 ForeColor = Color.DarkSlateBlue
             };
 
+            lblPlatformIndicator = new Label
+            {
+                Text = "PC",
+                AutoSize = true,
+                Location = new Point(90, 8),
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.DarkGreen
+            };
+
             lblStatus = new Label { Text = "No changes", AutoSize = true, Location = new Point(200, 8) };
 
             btnRestore = new Button
@@ -279,7 +312,7 @@ namespace BalanceEditor
             btnSave.Location = new Point(bottomPanel.Width - 140, 4);
             btnSave.Click += SaveButton_Click;
 
-            bottomPanel.Controls.AddRange(new Control[] { lblCredit, lblStatus, btnRestore, btnSave });
+            bottomPanel.Controls.AddRange(new Control[] { lblCredit, lblPlatformIndicator, lblStatus, btnRestore, btnSave });
 
             Controls.Add(rightPanel);
             Controls.Add(leftPanel);
@@ -306,6 +339,99 @@ namespace BalanceEditor
                 case "hero": ShowHeroDetail(tag); break;
                 case "enemy": ShowEnemyDetail(tag); break;
             }
+        }
+
+        // ══════════════════════════════════════════════════
+        //  PLATFORM SWITCHING (PC ↔ Android)
+        // ══════════════════════════════════════════════════
+
+        void CbPlatform_Changed(object sender, EventArgs e)
+        {
+            string plat = cbPlatform.SelectedItem?.ToString() ?? "PC";
+            SwitchPlatform(plat);
+        }
+
+        void SwitchPlatform(string platform)
+        {
+            bool wantAndroid = (platform == "Android");
+            if (wantAndroid == isAndroidMode) return;
+
+            // Warn about unsaved changes
+            if (Changes.Count > 0)
+            {
+                var result = MessageBox.Show(
+                    $"You have {Changes.Count} unsaved change(s).\n\nDiscard and switch platform?",
+                    "Switch Platform", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (result != DialogResult.Yes)
+                {
+                    cbPlatform.SelectedItem = isAndroidMode ? "Android" : "PC";
+                    return;
+                }
+            }
+
+            if (wantAndroid)
+            {
+                string androidDir = Path.Combine(
+                    Path.GetDirectoryName(Application.ExecutablePath), "APK_MOD");
+                string at = Path.Combine(androidDir, "towers_settings.plist");
+                string au = Path.Combine(androidDir, "units_settings.plist");
+
+                if (!File.Exists(at) || !File.Exists(au))
+                {
+                    MessageBox.Show(
+                        "No Android balance data found.\n\n" +
+                        "Use Data > Pull from Android first to import balance files from your phone.",
+                        "Android Mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    cbPlatform.SelectedItem = "PC";
+                    return;
+                }
+
+                towersFilePath = at;
+                unitsFilePath = au;
+                isAndroidMode = true;
+            }
+            else
+            {
+                towersFilePath = pcTowersPath;
+                unitsFilePath = pcUnitsPath;
+                isAndroidMode = false;
+            }
+
+            // Reload everything with new paths
+            LoadAllData();
+            Changes.Clear();
+
+            string cat = cbCategory?.SelectedItem?.ToString() ?? "Towers";
+            if (cat == "Balance Status")
+            {
+                HideTierList();
+                ShowTierList();
+            }
+            else
+            {
+                PopulateListBox(cat);
+            }
+            ClearDetail();
+            UpdatePlatformUI();
+        }
+
+        void UpdatePlatformUI()
+        {
+            if (isAndroidMode)
+            {
+                Text = "KRV Balance Editor By Shock  [ANDROID]";
+                lblPlatformIndicator.Text = "ANDROID";
+                lblPlatformIndicator.ForeColor = Color.OrangeRed;
+                BackColor = Color.FromArgb(210, 225, 240);
+            }
+            else
+            {
+                Text = "KRV Balance Editor By Shock";
+                lblPlatformIndicator.Text = "PC";
+                lblPlatformIndicator.ForeColor = Color.DarkGreen;
+                BackColor = Color.LightBlue;
+            }
+            UpdateStatus();
         }
 
         void ClearDetail()

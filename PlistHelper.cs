@@ -374,6 +374,14 @@ namespace BalanceEditor
             if (obj is long l) return l;
             if (obj is double d) return d;
             if (obj is int i) return i;
+            // Some plist values are stored as <string>123</string> instead of <integer>/<real>.
+            // Goblin minion HP, projectile damage on certain heroes etc. Parse them too —
+            // SavePlist (UpdateValue) preserves the original XML element type, so we don't
+            // accidentally convert <string> to <integer> on save.
+            if (obj is string s && double.TryParse(s,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out double v)) return v;
             return null;
         }
     }

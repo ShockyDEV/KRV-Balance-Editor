@@ -235,6 +235,178 @@ namespace BalanceEditor
             return null;
         }
 
+        /// <summary>
+        /// Find a unit entry by key across ALL factions (and heroes) in units_settings.plist.
+        /// </summary>
+        (Dictionary<string, object> Data, string Faction, string UnitKey)?
+            FindUnitByKey(string unitKey)
+        {
+            if (string.IsNullOrEmpty(unitKey)) return null;
+
+            foreach (var factionKv in unitsData)
+            {
+                if (factionKv.Key == "default_config") continue;
+                var factionDict = factionKv.Value as Dictionary<string, object>;
+                if (factionDict == null) continue;
+
+                if (factionDict.TryGetValue(unitKey, out var unitObj))
+                {
+                    var unitDict = unitObj as Dictionary<string, object>;
+                    if (unitDict != null) return (unitDict, factionKv.Key, unitKey);
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Recursively collect all summoned unit keys referenced via "unit" fields
+        /// that are string values (not dicts). Searches into sub-dicts like fx, object, etc.
+        /// </summary>
+        List<string> CollectSummonedUnitKeys(Dictionary<string, object> dict, int depth = 0)
+        {
+            var result = new List<string>();
+            if (dict == null || depth > 4) return result;
+
+            foreach (var kv in dict)
+            {
+                if (kv.Key == "unit" && kv.Value is string unitStr && !string.IsNullOrEmpty(unitStr))
+                {
+                    if (!result.Contains(unitStr))
+                        result.Add(unitStr);
+                }
+                else if (kv.Value is Dictionary<string, object> sub)
+                {
+                    // Recurse into sub-dicts (fx, object, etc.) but skip known noise
+                    if (StaticData.Skip.Contains(kv.Key) && kv.Key != "object" && kv.Key != "fx") continue;
+                    result.AddRange(CollectSummonedUnitKeys(sub, depth + 1));
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Renders a compact "Summoned Unit" sub-section within a skill panel.
+        /// Shows the unit's core stats (health, armor, speed) and main attack
+        /// as editable inputs. All paths reference units_settings.plist.
+        /// </summary>
+        int RenderSummonedUnitBlock(Control parent, int startY, string unitKey)
+        {
+            var found = FindUnitByKey(unitKey);
+            if (!found.HasValue) return startY;
+
+            var uData = found.Value.Data;
+            string faction = found.Value.Faction;
+            string file = "units";
+            var uBase = new List<object> { faction, unitKey };
+
+            int y = startY + 2;
+
+            // Header with teal color
+            var hdr = new Label
+            {
+                Text = "\u25B8 Summoned: " + Pretty(unitKey),
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(0, 120, 160),
+                AutoSize = true,
+                MaximumSize = new Size(parent.Width - 24, 0),
+                Location = new Point(16, y)
+            };
+            parent.Controls.Add(hdr);
+            y = hdr.Bottom + 4;
+
+            // Icon (if available)
+            int statsX = 16;
+            var unitIcon = IconExtractor.GetEnemyIcon(unitKey);
+            if (unitIcon == null) unitIcon = IconExtractor.GetTowerIcon(unitKey);
+            if (unitIcon != null)
+            {
+                var pic = new PictureBox
+                {
+                    Image = unitIcon,
+                    SizeMode = PictureBoxSizeMode.Zoom,
+                    Size = new Size(40, 40),
+                    Location = new Point(16, y),
+                    BackColor = Color.Transparent,
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+                parent.Controls.Add(pic);
+                statsX = 62;
+            }
+
+            int iconTop = y;
+
+            // Core stats
+            string[] coreStats = { "health", "armor", "speed", "block_range" };
+            foreach (var stat in coreStats)
+            {
+                if (!uData.ContainsKey(stat)) continue;
+                var val = uData[stat];
+                double? nv = PlistHelper.AsNumber(val);
+
+                if (nv.HasValue)
+                {
+                    CreateFieldRow(parent, statsX, y, Pretty(stat), file,
+                        new List<object>(uBase) { stat }, nv.Value);
+                    y += 24;
+
+                    // Inline armor type combo right after the armor row
+                    if (stat == "armor" && uData.ContainsKey("armor_type"))
+                    {
+                        double? atNum = PlistHelper.AsNumber(uData["armor_type"]);
+                        if (atNum.HasValue)
+                            y = AddArmorTypeRow(parent, y, atNum.Value, file,
+                                new List<object>(uBase) { "armor_type" }, statsX);
+                    }
+                }
+                else if (val is List<object> arr && arr.Count > 0 && arr.All(o => PlistHelper.AsNumber(o).HasValue))
+                {
+                    y = CreateArrayRow(parent, statsX, y, Pretty(stat), file,
+                        new List<object>(uBase) { stat }, arr);
+                }
+            }
+
+            // Ensure we're below any icon
+            y = Math.Max(y, iconTop + 44);
+
+            // Main attack skill
+            var mainSkill = FindTowerMainSkill(uData);
+            if (mainSkill.Data != null)
+            {
+                var mHdr = new Label
+                {
+                    Text = "Attack:",
+                    Font = new Font("Segoe UI", 7.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(0, 100, 140),
+                    AutoSize = true,
+                    Location = new Point(statsX, y)
+                };
+                parent.Controls.Add(mHdr);
+                y = mHdr.Bottom + 2;
+
+                var mPath = new List<object>(uBase) { "skills", mainSkill.Index };
+                string[] atkStats = { "damage_min", "damage_max", "cooldown", "range" };
+                foreach (var stat in atkStats)
+                {
+                    if (!mainSkill.Data.ContainsKey(stat)) continue;
+                    var val = mainSkill.Data[stat];
+                    double? nv = PlistHelper.AsNumber(val);
+                    if (nv.HasValue)
+                    {
+                        CreateFieldRow(parent, statsX, y, Pretty(stat), file,
+                            new List<object>(mPath) { stat }, nv.Value);
+                        y += 24;
+                    }
+                    else if (val is List<object> arr && arr.Count > 0 && arr.All(o => PlistHelper.AsNumber(o).HasValue))
+                    {
+                        y = CreateArrayRow(parent, statsX, y, Pretty(stat), file,
+                            new List<object>(mPath) { stat }, arr);
+                    }
+                }
+            }
+
+            return y + 4;
+        }
+
         void RebuildTowerContent(TowerFamily fam, string varKey, int skillLevelIdx = -1)
         {
             contentPanel.SuspendLayout();
@@ -723,9 +895,6 @@ namespace BalanceEditor
             string file = "units";
             var heroBase = new List<object> { "heroes", heroKey };
 
-            // Ensure magic_resistance exists (game supports it for all heroes)
-            PlistHelper.EnsureField(unitsDoc, heroData, heroBase, "magic_resistance", 0);
-
             // ── Core Stats GroupBox ──
             var gbStats = new GroupBox
             {
@@ -737,13 +906,16 @@ namespace BalanceEditor
 
             int sy = 20;
 
-            // Top-level array/scalar stats at hero level
-            string[] topStats = { "health", "armor", "speed", "magic_resistance", "block_range", "skills_upgrades" };
+            // Top-level array/scalar stats at hero level.
+            // Note: magic_resistance is intentionally omitted — confirmed dead data in the
+            // game engine (no symbol in Kingdom Rush Vengeance.exe). Use armor_type instead.
+            // Order: health, armor, then armor_type combo (right next to armor), then speed, etc.
+            string[] topStats = { "health", "armor", "speed", "block_range", "skills_upgrades" };
             foreach (var stat in topStats)
             {
                 if (!heroData.ContainsKey(stat)) continue;
                 var val = heroData[stat];
-                bool isArmor = (stat == "armor" || stat == "magic_resistance");
+                bool isArmor = (stat == "armor");
 
                 if (val is List<object> arr && arr.Count > 0 && arr.All(o => PlistHelper.AsNumber(o).HasValue))
                 {
@@ -768,28 +940,15 @@ namespace BalanceEditor
                             : AddStatRow(gbStats, sy, Pretty(stat), nv.Value, file,
                                 new List<object>(heroBase) { stat });
                 }
-            }
 
-            // Armor type label
-            var armorType = PlistHelper.GetString(heroData, "armor_type");
-            if (armorType != null)
-            {
-                double? atNum = PlistHelper.AsNumber(heroData["armor_type"]);
-                if (atNum.HasValue)
-                    sy = AddStatRow(gbStats, sy, "Armor Type", atNum.Value, file,
-                        new List<object>(heroBase) { "armor_type" });
-                else
+                // Insert Armor Type combo immediately after the Armor row
+                if (stat == "armor")
                 {
-                    var atLbl = new Label
-                    {
-                        Text = "Armor Type: " + Pretty(armorType),
-                        Font = new Font("Segoe UI", 8.5f),
-                        ForeColor = FieldLabelColor,
-                        AutoSize = true,
-                        Location = new Point(8, sy)
-                    };
-                    gbStats.Controls.Add(atLbl);
-                    sy = atLbl.Bottom + 4;
+                    PlistHelper.EnsureField(unitsDoc, heroData, heroBase, "armor_type", 0);
+                    double? atNum = PlistHelper.AsNumber(heroData["armor_type"]);
+                    if (atNum.HasValue)
+                        sy = AddArmorTypeRow(gbStats, sy, atNum.Value, file,
+                            new List<object>(heroBase) { "armor_type" });
                 }
             }
 
@@ -951,8 +1110,10 @@ namespace BalanceEditor
             };
 
             int sy = 20;
+            // magic_resistance intentionally omitted — confirmed dead in the engine.
+            // Armor type combo is rendered immediately after the armor row.
             string[] coreStats = { "health", "armor", "speed", "damage_min", "damage_max",
-                                   "cooldown", "magic_resistance", "gold", "skulls" };
+                                   "cooldown", "gold", "skulls" };
 
             foreach (var stat in coreStats)
             {
@@ -967,22 +1128,16 @@ namespace BalanceEditor
                 {
                     sy = CreateArrayRow(gbStats, 8, sy, Pretty(stat), file, new List<object>(basePath) { stat }, arr);
                 }
-            }
 
-            // Armor type label
-            var armorType = PlistHelper.GetString(data, "armor_type");
-            if (armorType != null)
-            {
-                var atLbl = new Label
+                // Armor Type combo right after the Armor row (Magical = magic-resistant,
+                // e.g. Glacial Wolf, Apex Stalker, Draugr)
+                if (stat == "armor")
                 {
-                    Text = "Armor Type: " + Pretty(armorType),
-                    Font = new Font("Segoe UI", 8.5f),
-                    ForeColor = FieldLabelColor,
-                    AutoSize = true,
-                    Location = new Point(8, sy)
-                };
-                gbStats.Controls.Add(atLbl);
-                sy = atLbl.Bottom + 4;
+                    double? atNum = PlistHelper.AsNumber(data.ContainsKey("armor_type") ? data["armor_type"] : null);
+                    if (atNum.HasValue)
+                        sy = AddArmorTypeRow(gbStats, sy, atNum.Value, file,
+                            new List<object>(basePath) { "armor_type" });
+                }
             }
 
             // Remaining numeric fields not in coreStats
@@ -1133,15 +1288,20 @@ namespace BalanceEditor
             else
                 y = RenderFields(parent, skillDict, file, skillPath, y);
 
+            // ── Summoned unit stats (detect "unit" references in skill data) ──
+            var summonedKeys = CollectSummonedUnitKeys(skillDict);
+            foreach (var uk in summonedKeys)
+                y = RenderSummonedUnitBlock(parent, y, uk);
+
             return y + 4;
         }
 
         /// <summary>
-        /// Like RenderFields but level-aware: array values show only the value at levelIdx.
-        /// When maxLevels > 0 and levelIdx is within range, scalars also get indexed paths
-        /// so they can be expanded to arrays on save (per-level editing).
-        /// The last level (levelIdx == maxLevels-1) acts as "global" view: scalars shown plain,
-        /// arrays shown in full when levelIdx exceeds their length.
+        /// Like RenderFields but level-aware: when levelIdx is within an array's bounds,
+        /// show only the value at that level (single editable textbox). Scalars always
+        /// render plain — we don't expand them into per-level arrays, because the game
+        /// engine (esp. on Android) can't always handle that (e.g. Veruk's `cant` only
+        /// supports 2 levels; growing it breaks summoning).
         /// isVFX=true highlights labels with yellow (for "object" sub-dict content).
         /// </summary>
         int RenderLevelAwareFields(Control parent, Dictionary<string, object> data, string file,
@@ -1150,8 +1310,6 @@ namespace BalanceEditor
         {
             if (data == null) return startY;
             int y = startY;
-            bool isGlobal = maxLevels > 0 && levelIdx >= maxLevels - 1;
-            bool indexScalars = maxLevels > 0 && !isGlobal;
             bool showVFX = cbShowVFX?.Checked ?? false;
             Color? hl = isVFX ? (Color?)VFXHighlight : null;
 
@@ -1169,40 +1327,73 @@ namespace BalanceEditor
 
                 if (numVal.HasValue)
                 {
-                    if (indexScalars)
-                    {
-                        CreateFieldRow(parent, 8, y, Pretty(key) + $" [Lv{levelIdx + levelLabelOffset}]", file,
-                            new List<object>(path) { levelIdx }, numVal.Value, hl);
-                    }
-                    else
-                    {
-                        CreateFieldRow(parent, 8, y, Pretty(key), file, path, numVal.Value, hl);
-                    }
+                    // Scalars always render as plain scalars (no per-level indexing).
+                    // Expanding a scalar into an array of per-level values breaks Android compat.
+                    CreateFieldRow(parent, 8, y, Pretty(key), file, path, numVal.Value, hl);
                     y += 24;
                     continue;
                 }
 
-                if (kv.Value is List<object> arr && arr.Count > 0 && arr.All(o => PlistHelper.AsNumber(o).HasValue))
+                if (kv.Value is List<object> arr && arr.Count > 0)
                 {
-                    if (levelIdx < arr.Count)
+                    if (arr.All(o => PlistHelper.AsNumber(o).HasValue))
                     {
-                        double v = PlistHelper.AsNumber(arr[levelIdx]) ?? 0;
-                        CreateFieldRow(parent, 8, y, Pretty(key) + $" [Lv{levelIdx + levelLabelOffset}]", file,
-                            new List<object>(path) { levelIdx }, v, hl);
-                        y += 24;
+                        if (levelIdx < arr.Count)
+                        {
+                            // In-bounds: show only the value at the selected level.
+                            double v = PlistHelper.AsNumber(arr[levelIdx]) ?? 0;
+                            CreateFieldRow(parent, 8, y, Pretty(key) + $" [Lv{levelIdx + levelLabelOffset}]", file,
+                                new List<object>(path) { levelIdx }, v, hl);
+                            y += 24;
+                        }
+                        else
+                        {
+                            // Out-of-bounds: show the full array read-only-ish (don't grow it).
+                            // Growing arrays beyond the game's supported level count breaks things
+                            // (e.g. Veruk's `cant` only supports 2 levels; 3 elements broke summoning).
+                            y = CreateArrayRow(parent, 8, y, Pretty(key), file, path, arr, hl);
+                        }
+                        continue;
                     }
-                    else if (!isGlobal)
+                    // List of dicts (e.g. modifier_tick, effects, paths_objects, object[fx,decal])
+                    if (arr.All(o => o is Dictionary<string, object>))
                     {
-                        double v = PlistHelper.AsNumber(arr[arr.Count - 1]) ?? 0;
-                        CreateFieldRow(parent, 8, y, Pretty(key) + $" [Lv{levelIdx + levelLabelOffset}]", file,
-                            new List<object>(path) { levelIdx }, v, hl);
-                        y += 24;
+                        bool anyNumeric = arr.Cast<Dictionary<string, object>>()
+                            .Any(d => HasNumericContent(d, 1));
+                        if (!anyNumeric) continue;
+                        var lstLbl = new Label
+                        {
+                            Text = Pretty(key) + ":",
+                            Font = new Font("Segoe UI", 8, FontStyle.Bold),
+                            ForeColor = isVFX ? Color.FromArgb(120, 100, 0) : FieldLabelColor,
+                            BackColor = isVFX ? VFXHighlight : Color.Transparent,
+                            AutoSize = true,
+                            Location = new Point(8, y)
+                        };
+                        parent.Controls.Add(lstLbl);
+                        y = lstLbl.Bottom + 2;
+                        for (int idx = 0; idx < arr.Count; idx++)
+                        {
+                            var sd = (Dictionary<string, object>)arr[idx];
+                            if (!HasNumericContent(sd, 1)) continue;
+                            string idLabel = sd.TryGetValue("id", out var idv) ? idv as string
+                                          : sd.TryGetValue("key", out var kv2) ? kv2 as string : null;
+                            var idxLbl = new Label
+                            {
+                                Text = idLabel != null ? $"[{idx}] {Pretty(idLabel)}" : $"[{idx}]",
+                                Font = new Font("Segoe UI", 7.5f, FontStyle.Italic),
+                                ForeColor = Color.Gray,
+                                AutoSize = true,
+                                Location = new Point(20, y)
+                            };
+                            parent.Controls.Add(idxLbl);
+                            y = idxLbl.Bottom + 1;
+                            var subPath = new List<object>(path) { idx };
+                            y = RenderLevelAwareFields(parent, sd, file, subPath, y, levelIdx,
+                                levelLabelOffset, maxLevels, isVFX);
+                        }
+                        continue;
                     }
-                    else
-                    {
-                        y = CreateArrayRow(parent, 8, y, Pretty(key), file, path, arr, hl);
-                    }
-                    continue;
                 }
 
                 if (kv.Value is Dictionary<string, object> sub && HasNumericContent(sub, 1))
