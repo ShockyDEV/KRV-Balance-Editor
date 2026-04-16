@@ -476,10 +476,30 @@ namespace BalanceEditor
                 string freeProductsPath = Path.Combine(androidWorkDir, "fullads_products_free.json");
                 GenerateFreeProductsJson(freeProductsPath);
 
+                // ── Normalize modded plists to the Android engine's schema ──
+                // The Steam (PC) balance can be a patch ahead of the Android build, so its
+                // plists may contain new array elements, new dict keys, or new field types
+                // the older Android engine can't parse. Writing those straight into the APK
+                // triggers a crash the moment the game reads the unknown structure (e.g.
+                // trying to iterate effects[2] when the engine only knows effects[0..1]).
+                // So: for each plist, diff the PC shape against the APK's original shape
+                // and revert any purely-structural delta, while keeping user's numeric
+                // edits anywhere the leaf exists in both. The push is now safe on both
+                // game versions.
+                SetStatus("Normalizing plists for Android engine...");
+                string androidTowers = Path.Combine(androidWorkDir, "towers_settings.android.plist");
+                string androidUnits  = Path.Combine(androidWorkDir, "units_settings.android.plist");
+                NormalizePlistForAndroid(assetsApkPath,
+                    "assets/KR4/Settings/towers_settings.plist",
+                    towersFilePath, androidTowers);
+                NormalizePlistForAndroid(assetsApkPath,
+                    "assets/KR4/Settings/units_settings.plist",
+                    unitsFilePath, androidUnits);
+
                 using (var zip = ZipFile.Open(moddedApkPath, ZipArchiveMode.Update))
                 {
-                    ReplaceZipEntry(zip, "assets/KR4/Settings/towers_settings.plist", towersFilePath);
-                    ReplaceZipEntry(zip, "assets/KR4/Settings/units_settings.plist", unitsFilePath);
+                    ReplaceZipEntry(zip, "assets/KR4/Settings/towers_settings.plist", androidTowers);
+                    ReplaceZipEntry(zip, "assets/KR4/Settings/units_settings.plist", androidUnits);
                     ReplaceZipEntry(zip, "assets/KR4/Settings/fullads_products.json", freeProductsPath);
                 }
             }
@@ -799,6 +819,48 @@ namespace BalanceEditor
             var existing = zip.GetEntry(entryPath);
             if (existing != null) existing.Delete();
             zip.CreateEntryFromFile(sourceFile, entryPath, CompressionLevel.NoCompression);
+        }
+
+        /// <summary>
+        /// Produce an Android-safe copy of <paramref name="moddedPlistPath"/> by
+        /// pulling the original plist out of <paramref name="sourceApkPath"/>,
+        /// diffing structures, and writing a normalized plist to
+        /// <paramref name="outPath"/>. Keeps every numeric edit the user made
+        /// while stripping PC-only array growths / new keys that would crash
+        /// the older Android engine.
+        /// </summary>
+        void NormalizePlistForAndroid(string sourceApkPath, string entryInsideApk,
+            string moddedPlistPath, string outPath)
+        {
+            // Read the APK's original plist into memory
+            System.Xml.Linq.XDocument originalDoc;
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(sourceApkPath))
+            {
+                var entry = zip.GetEntry(entryInsideApk);
+                if (entry == null)
+                    throw new System.IO.FileNotFoundException(
+                        $"Entry '{entryInsideApk}' not found in {sourceApkPath}");
+                using (var s = entry.Open())
+                    originalDoc = System.Xml.Linq.XDocument.Load(s);
+            }
+
+            // Load the modded (PC-shaped) plist
+            var moddedDoc = System.Xml.Linq.XDocument.Load(moddedPlistPath);
+
+            // Normalize shape in-place on moddedDoc
+            var (kept, reverted) = PlistHelper.NormalizeAgainst(moddedDoc, originalDoc);
+            System.Diagnostics.Debug.WriteLine(
+                $"[android-normalize] {System.IO.Path.GetFileName(moddedPlistPath)}: " +
+                $"kept {kept} numeric edits, reverted {reverted} structural deltas");
+
+            // Write to outPath with the full plist header
+            string header =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+                "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " +
+                "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
+            string xml = moddedDoc.Root.ToString();
+            System.IO.File.WriteAllText(outPath, header + xml + "\n",
+                System.Text.Encoding.UTF8);
         }
 
         // ══════════════════════════════════════════════════

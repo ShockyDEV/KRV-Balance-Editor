@@ -244,6 +244,116 @@ namespace BalanceEditor
             return Navigate(doc, path) != null;
         }
 
+        /// <summary>
+        /// Normalize the 'modded' plist so its structure matches 'original' (the
+        /// shape expected by the Android engine), while preserving any leaf
+        /// scalar values the user has changed where the leaf exists in both.
+        ///
+        /// Why this exists: the Steam PC game often runs a newer balance patch
+        /// than the Android build. Newer patches can grow arrays, add dict
+        /// keys, or change primitive types at the leaves. If we push a
+        /// PC-shaped plist straight into the older APK the engine crashes
+        /// the moment it tries to read a structure it doesn't understand
+        /// (classic case: iterating effects[2] when the old schema only has
+        /// effects[0..1]).
+        ///
+        /// Returns (numericEditsKept, structuralRevertsCount).
+        /// </summary>
+        public static (int Kept, int Reverted) NormalizeAgainst(XDocument modded, XDocument original)
+        {
+            var mRoot = modded.Root?.Elements().FirstOrDefault();
+            var oRoot = original.Root?.Elements().FirstOrDefault();
+            if (mRoot == null || oRoot == null) return (0, 0);
+            int kept = 0, reverted = 0;
+            NormalizeNode(mRoot, oRoot, ref kept, ref reverted);
+            return (kept, reverted);
+        }
+
+        static void NormalizeNode(XElement modded, XElement original, ref int kept, ref int reverted)
+        {
+            // Type mismatch → keep original shape (safer for Android).
+            if (modded.Name.LocalName != original.Name.LocalName)
+            {
+                modded.ReplaceWith(new XElement(original));
+                reverted++;
+                return;
+            }
+
+            if (modded.Name.LocalName == "dict")
+            {
+                // Build key→value mapping for original
+                var oChildren = original.Elements().ToList();
+                var oKeys = new Dictionary<string, XElement>(StringComparer.Ordinal);
+                for (int i = 0; i < oChildren.Count; i++)
+                {
+                    if (oChildren[i].Name.LocalName == "key" && i + 1 < oChildren.Count)
+                        oKeys[oChildren[i].Value ?? ""] = oChildren[i + 1];
+                }
+
+                // Walk modded pairs.
+                var mChildren = modded.Elements().ToList();
+                for (int i = 0; i < mChildren.Count; i++)
+                {
+                    if (mChildren[i].Name.LocalName != "key") continue;
+                    string key = mChildren[i].Value ?? "";
+                    var valEl = i + 1 < mChildren.Count ? mChildren[i + 1] : null;
+                    if (!oKeys.TryGetValue(key, out var oVal))
+                    {
+                        // Key is new vs original APK schema. Policy:
+                        //   - Primitive leaf (int/real/bool/string/data): KEEP.
+                        //     Engines tolerate unknown scalar keys — either they're
+                        //     recognised by name and applied (e.g. armor_type added
+                        //     to a hero that didn't have it) or silently ignored.
+                        //   - Complex leaf (dict/array): DROP. Those often reference
+                        //     entities/shapes the older engine doesn't know, and
+                        //     they're the usual crash suspects.
+                        if (valEl != null && (valEl.Name.LocalName == "dict" || valEl.Name.LocalName == "array"))
+                        {
+                            mChildren[i].Remove();
+                            valEl.Remove();
+                            reverted++;
+                            i++; // skip the value we removed
+                            continue;
+                        }
+                        // Primitive additions: keep as-is
+                        continue;
+                    }
+                    if (valEl != null)
+                        NormalizeNode(valEl, oVal, ref kept, ref reverted);
+                }
+            }
+            else if (modded.Name.LocalName == "array")
+            {
+                var mItems = modded.Elements().ToList();
+                var oItems = original.Elements().ToList();
+
+                // Truncate modded array if it grew past the original's length
+                if (mItems.Count > oItems.Count)
+                {
+                    for (int i = oItems.Count; i < mItems.Count; i++)
+                        mItems[i].Remove();
+                    mItems = mItems.GetRange(0, oItems.Count);
+                    reverted++;
+                }
+
+                // Recurse into each paired element
+                for (int i = 0; i < mItems.Count; i++)
+                    NormalizeNode(mItems[i], oItems[i], ref kept, ref reverted);
+            }
+            else
+            {
+                // Leaf scalar: keep modded value if same primitive kind, else revert.
+                string mVal = modded.Value ?? "";
+                string oVal = original.Value ?? "";
+                if (mVal != oVal)
+                {
+                    // Same element name means same primitive kind — safe to keep the edit
+                    kept++;
+                }
+                // Nothing else to do for identical leaves
+            }
+        }
+
         /// <summary>Save plist back to file. Creates a .backup on first save.</summary>
         public static void SavePlist(XDocument doc, string filepath)
         {
