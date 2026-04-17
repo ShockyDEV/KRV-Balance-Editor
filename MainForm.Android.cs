@@ -925,7 +925,7 @@ namespace BalanceEditor
                 // Count existing unlocks
                 int beforeTrue = Regex.Matches(saveContent, @"<key>purchased</key>\s*<true\s*/>").Count;
 
-                // Replace all purchased=false → purchased=true
+                // Replace all purchased=false → purchased=true (heroes + towers)
                 SetStatus("Unlocking all heroes and towers...");
                 string modified = Regex.Replace(saveContent,
                     @"(<key>purchased</key>\s*)<false\s*/>", "$1<true/>");
@@ -933,11 +933,41 @@ namespace BalanceEditor
                 int afterTrue = Regex.Matches(modified, @"<key>purchased</key>\s*<true\s*/>").Count;
                 int unlocked = afterTrue - beforeTrue;
 
-                if (unlocked == 0)
+                // Also unlock the Sandstorm DLC campaign (Hammerhold).
+                // Three states possible in the save:
+                //   1. KR4_DLC_SANDSTORM already = <true/>  → nothing to do
+                //   2. KR4_DLC_SANDSTORM = <false/>          → flip to true
+                //   3. dlc_purchased dict is empty or the key
+                //      doesn't exist                         → inject the entry
+                // Case 4 (dlc_purchased key missing altogether) is not observed
+                // in real saves — the game always writes the dict.
+                bool dlcFlipped = false;
+                if (Regex.IsMatch(modified,
+                        @"<key>KR4_DLC_SANDSTORM</key>\s*<false\s*/>"))
+                {
+                    modified = Regex.Replace(modified,
+                        @"(<key>KR4_DLC_SANDSTORM</key>\s*)<false\s*/>",
+                        "$1<true/>");
+                    dlcFlipped = true;
+                }
+                else if (!Regex.IsMatch(modified,
+                        @"<key>KR4_DLC_SANDSTORM</key>\s*<true\s*/>"))
+                {
+                    // Key absent — insert into the dlc_purchased dict
+                    modified = Regex.Replace(modified,
+                        @"(<key>dlc_purchased</key>\s*<dict>)(\s*)",
+                        "$1$2\t<key>KR4_DLC_SANDSTORM</key>$2\t<true/>$2",
+                        RegexOptions.None);
+                    dlcFlipped = Regex.IsMatch(modified,
+                        @"<key>KR4_DLC_SANDSTORM</key>\s*<true\s*/>");
+                }
+
+                if (unlocked == 0 && !dlcFlipped)
                 {
                     Cursor = Cursors.Default;
                     SetStatus("Already unlocked");
-                    MessageBox.Show("All heroes and towers are already unlocked!",
+                    MessageBox.Show(
+                        "All heroes, towers, and DLC are already unlocked!",
                         "Unlock All", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -947,9 +977,12 @@ namespace BalanceEditor
                 PushFileViaRunAs(adb, KRV_PACKAGE, "files/save_data.plist", modified);
 
                 Cursor = Cursors.Default;
-                SetStatus($"Unlocked {unlocked} items!");
+                string summary = $"Unlocked {unlocked} heroes/towers";
+                if (dlcFlipped) summary += " + Sandstorm DLC campaign";
+                SetStatus(summary + "!");
                 MessageBox.Show(
-                    $"Done! Unlocked {unlocked} heroes/towers.\n\n" +
+                    $"Done!\n\n  • {unlocked} heroes/towers unlocked\n" +
+                    $"  • Sandstorm DLC: {(dlcFlipped ? "ENABLED" : "already enabled")}\n\n" +
                     "Open the game to enjoy all content!",
                     "Unlock All", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
